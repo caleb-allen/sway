@@ -47,7 +47,6 @@ struct ipc_client {
 	struct wl_event_source *writable_event_source;
 	struct sway_server *server;
 	int fd;
-	uint32_t security_policy;
 	enum ipc_command_type subscribed_events;
 	size_t write_buffer_len;
 	size_t write_buffer_size;
@@ -141,7 +140,7 @@ struct sockaddr_un *ipc_user_sockaddr(void) {
 		dir = "/tmp";
 	}
 	if (path_size <= snprintf(ipc_sockaddr->sun_path, path_size,
-			"%s/sway-ipc.%i.%i.sock", dir, getuid(), getpid())) {
+			"%s/sway-ipc.%u.%i.sock", dir, getuid(), getpid())) {
 		sway_abort("Socket path won't fit into ipc_sockaddr->sun_path");
 	}
 
@@ -243,7 +242,6 @@ int ipc_client_handle_readable(int client_fd, uint32_t mask, void *data) {
 	}
 
 	uint8_t buf[IPC_HEADER_SIZE];
-	uint32_t *buf32 = (uint32_t*)(buf + sizeof(ipc_magic));
 	// Should be fully available, because read_available >= IPC_HEADER_SIZE
 	ssize_t received = recv(client_fd, buf, IPC_HEADER_SIZE, 0);
 	if (received == -1) {
@@ -258,8 +256,8 @@ int ipc_client_handle_readable(int client_fd, uint32_t mask, void *data) {
 		return 0;
 	}
 
-	memcpy(&client->pending_length, &buf32[0], sizeof(buf32[0]));
-	memcpy(&client->pending_type, &buf32[1], sizeof(buf32[1]));
+	memcpy(&client->pending_length, buf + sizeof(ipc_magic), sizeof(uint32_t));
+	memcpy(&client->pending_type, buf + sizeof(ipc_magic) + sizeof(uint32_t), sizeof(uint32_t));
 
 	if (read_available - received >= (long)client->pending_length) {
 		// Reset pending values.
@@ -877,6 +875,16 @@ void ipc_client_handle_command(struct ipc_client *client, uint32_t payload_lengt
 		goto exit_cleanup;
 	}
 
+	case IPC_GET_BINDING_STATE:
+	{
+		json_object *current_mode = ipc_json_get_binding_mode();
+		const char *json_string = json_object_to_json_string(current_mode);
+		ipc_send_reply(client, payload_type, json_string,
+			(uint32_t)strlen(json_string));
+		json_object_put(current_mode); // free
+		goto exit_cleanup;
+	}
+
 	case IPC_GET_CONFIG:
 	{
 		json_object *json = json_object_new_object();
@@ -911,11 +919,10 @@ bool ipc_send_reply(struct ipc_client *client, enum ipc_command_type payload_typ
 	assert(payload);
 
 	char data[IPC_HEADER_SIZE];
-	uint32_t *data32 = (uint32_t*)(data + sizeof(ipc_magic));
 
 	memcpy(data, ipc_magic, sizeof(ipc_magic));
-	memcpy(&data32[0], &payload_length, sizeof(payload_length));
-	memcpy(&data32[1], &payload_type, sizeof(payload_type));
+	memcpy(data + sizeof(ipc_magic), &payload_length, sizeof(payload_length));
+	memcpy(data + sizeof(ipc_magic) + sizeof(payload_length), &payload_type, sizeof(payload_type));
 
 	while (client->write_buffer_len + IPC_HEADER_SIZE + payload_length >=
 				 client->write_buffer_size) {

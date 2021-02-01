@@ -75,6 +75,9 @@ supported. *For all replies, any properties not listed are subject to removal.*
 |- 11
 :  SYNC
 :  Replies failure object for i3 compatibility
+|- 12
+:  GET_BINDING_STATE
+:  Request the current binding state, e.g. the currently active binding mode name.
 |- 100
 :  GET_INPUTS
 :  Get the list of input devices
@@ -90,8 +93,10 @@ Parses and runs the payload as sway commands
 *REPLY*++
 An array of objects corresponding to each command that was parsed. Each object
 has the property _success_, which is a boolean indicating whether the command
-was successful. The object may also contain the property _error_, which is a
-human readable error message.
+was successful. The object may also contain the properties _error_ and _parse\_error_.
+The _error_ property is a human readable error message while _parse\_error_ is a
+boolean indicating whether the reason the command failed was because the command
+was unknown or not able to be parsed.
 
 *Example Reply:*
 ```
@@ -101,6 +106,7 @@ human readable error message.
 	},
 	{
 		"success": false,
+		"parse_error": true,
 		"error": "Invalid/unknown command"
 	}
 ]
@@ -379,6 +385,14 @@ node and will have the following properties:
 |- shell
 :  string
 :  (Only views) The shell of the view, such as _xdg\_shell_ or _xwayland_
+|- inhibit_idle
+:  boolean
+:  (Only views) Whether the view is inhibiting the idle state
+|- idle_inhibitors
+:  object
+:  (Only views) An object containing the state of the _application_ and _user_ idle inhibitors.
+    _application_ can be _enabled_ or _none_.
+    _user_ can be _focus_, _fullscreen_, _open_, _visible_ or _none_.
 |- window
 :  integer
 :  (Only xwayland views) The X11 window ID for the xwayland view
@@ -676,6 +690,11 @@ node and will have the following properties:
 							"app_id": null,
 							"visible": true,
 							"shell": "xwayland",
+							"inhibit_idle": true,
+							"idle_inhibitors": {
+								"application": "none",
+								"user": "visible",
+							},
 							"window_properties": {
 								"class": "URxvt",
 								"instance": "urxvt",
@@ -731,6 +750,11 @@ node and will have the following properties:
 							"app_id": "termite",
 							"visible": true,
 							"shell": "xdg_shell",
+							"inhibit_idle": false,
+							"idle_inhibitors": {
+								"application": "none",
+								"user": "fullscreen",
+							},
 							"nodes": [
 							]
 						}
@@ -808,6 +832,9 @@ their value mean can be found in *sway-bar*(5):
 |- workspace_buttons
 :  boolean
 :  Whether to display the workspace buttons on the bar
+|- workspace_min_width
+:  integer
+:  Minimum width in px for the workspace buttons on the bar
 |- binding_mode_indicator
 :  boolean
 :  Whether to display the current binding mode on the bar
@@ -910,6 +937,7 @@ containing the _#RRGGBBAA_ representation of the color:
 	"status_padding": 1,
 	"status_edge_padding": 3,
 	"workspace_buttons": true,
+	"workspace_min_width": 0,
 	"binding_mode_indicator": true,
 	"verbose": false,
 	"pango_markup": false,
@@ -1048,6 +1076,23 @@ boolean value _false_.
 	"success": false
 }
 ```
+
+## 12. GET_BINDING_STATE
+
+*MESSAGE*++
+Returns the currently active binding mode.
+
+*REPLY*++
+A single object that contains the property _name_, which is set to the
+currently active binding mode as a string.
+
+*Exact Reply:*
+```
+{
+	"name": "default"
+}
+```
+
 
 ## 100. GET_INPUTS
 

@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <assert.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <json.h>
@@ -153,6 +154,8 @@ struct status_line *status_line_init(char *cmd) {
 		exit(1);
 	}
 
+	assert(!getenv("WAYLAND_SOCKET") && "display must be initialized before "
+		" starting `status-command`; WAYLAND_SOCKET should not be set");
 	status->pid = fork();
 	if (status->pid == 0) {
 		dup2(pipe_read_fd[1], STDOUT_FILENO);
@@ -182,6 +185,7 @@ struct status_line *status_line_init(char *cmd) {
 
 void status_line_free(struct status_line *status) {
 	status_line_close_fds(status);
+	kill(status->pid, status->cont_signal);
 	kill(status->pid, SIGTERM);
 	waitpid(status->pid, NULL, 0);
 	if (status->protocol == PROTOCOL_I3BAR) {

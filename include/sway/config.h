@@ -6,11 +6,13 @@
 #include <time.h>
 #include <wlr/interfaces/wlr_switch.h>
 #include <wlr/types/wlr_box.h>
+#include <wlr/types/wlr_tablet_tool.h>
 #include <xkbcommon/xkbcommon.h>
 #include "../include/config.h"
 #include "list.h"
 #include "swaynag.h"
 #include "tree/container.h"
+#include "sway/input/tablet.h"
 #include "sway/tree/root.h"
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 
@@ -116,6 +118,11 @@ enum input_config_mapped_to {
 	MAPPED_TO_REGION,
 };
 
+struct input_config_tool {
+	enum wlr_tablet_tool_type type;
+	enum sway_tablet_tool_mode mode;
+};
+
 /**
  * options for input devices
  */
@@ -160,6 +167,8 @@ struct input_config {
 	char *mapped_to_output;
 	struct wlr_box *mapped_to_region;
 
+	list_t *tools;
+
 	bool capturable;
 	struct wlr_box region;
 };
@@ -170,6 +179,12 @@ struct input_config {
 struct seat_attachment_config {
 	char *identifier;
 	// TODO other things are configured here for some reason
+};
+
+enum seat_config_hide_cursor_when_typing {
+	HIDE_WHEN_TYPING_DEFAULT, // the default is currently disabled
+	HIDE_WHEN_TYPING_ENABLE,
+	HIDE_WHEN_TYPING_DISABLE,
 };
 
 enum seat_config_allow_constrain {
@@ -207,6 +222,7 @@ struct seat_config {
 	int fallback; // -1 means not set
 	list_t *attachments; // list of seat_attachment configs
 	int hide_cursor_timeout;
+	enum seat_config_hide_cursor_when_typing hide_cursor_when_typing;
 	enum seat_config_allow_constrain allow_constrain;
 	enum seat_config_shortcuts_inhibit shortcuts_inhibit;
 	enum seat_keyboard_grouping keyboard_grouping;
@@ -320,6 +336,7 @@ struct bar_config {
 	struct side_gaps gaps;
 	int status_padding;
 	int status_edge_padding;
+	uint32_t workspace_min_width;
 	struct {
 		char *background;
 		char *statusline;
@@ -399,61 +416,6 @@ enum command_context {
 	CONTEXT_IPC = 1 << 2,
 	CONTEXT_CRITERIA = 1 << 3,
 	CONTEXT_ALL = 0xFFFFFFFF,
-};
-
-struct command_policy {
-	char *command;
-	uint32_t context;
-};
-
-enum secure_feature {
-	FEATURE_LOCK = 1 << 0,
-	FEATURE_PANEL = 1 << 1,
-	FEATURE_BACKGROUND = 1 << 2,
-	FEATURE_SCREENSHOT = 1 << 3,
-	FEATURE_FULLSCREEN = 1 << 4,
-	FEATURE_KEYBOARD = 1 << 5,
-	FEATURE_MOUSE = 1 << 6,
-};
-
-struct feature_policy {
-	char *program;
-	uint32_t features;
-};
-
-enum ipc_feature {
-	IPC_FEATURE_COMMAND = 1 << 0,
-	IPC_FEATURE_GET_WORKSPACES = 1 << 1,
-	IPC_FEATURE_GET_OUTPUTS = 1 << 2,
-	IPC_FEATURE_GET_TREE = 1 << 3,
-	IPC_FEATURE_GET_MARKS = 1 << 4,
-	IPC_FEATURE_GET_BAR_CONFIG = 1 << 5,
-	IPC_FEATURE_GET_VERSION = 1 << 6,
-	IPC_FEATURE_GET_INPUTS = 1 << 7,
-	IPC_FEATURE_EVENT_WORKSPACE = 1 << 8,
-	IPC_FEATURE_EVENT_OUTPUT = 1 << 9,
-	IPC_FEATURE_EVENT_MODE = 1 << 10,
-	IPC_FEATURE_EVENT_WINDOW = 1 << 11,
-	IPC_FEATURE_EVENT_BINDING = 1 << 12,
-	IPC_FEATURE_EVENT_INPUT = 1 << 13,
-	IPC_FEATURE_GET_SEATS = 1 << 14,
-
-	IPC_FEATURE_ALL_COMMANDS = IPC_FEATURE_COMMAND |
-		IPC_FEATURE_GET_WORKSPACES | IPC_FEATURE_GET_OUTPUTS |
-		IPC_FEATURE_GET_TREE | IPC_FEATURE_GET_MARKS |
-		IPC_FEATURE_GET_BAR_CONFIG | IPC_FEATURE_GET_VERSION |
-		IPC_FEATURE_GET_INPUTS | IPC_FEATURE_GET_SEATS,
-	IPC_FEATURE_ALL_EVENTS = IPC_FEATURE_EVENT_WORKSPACE |
-		IPC_FEATURE_EVENT_OUTPUT | IPC_FEATURE_EVENT_MODE |
-		IPC_FEATURE_EVENT_WINDOW | IPC_FEATURE_EVENT_BINDING |
-		IPC_FEATURE_EVENT_INPUT,
-
-	IPC_FEATURE_ALL = IPC_FEATURE_ALL_COMMANDS | IPC_FEATURE_ALL_EVENTS,
-};
-
-struct ipc_policy {
-	char *program;
-	uint32_t features;
 };
 
 enum focus_follows_mouse_mode {
@@ -556,6 +518,7 @@ struct sway_config {
 	struct side_gaps gaps_outer;
 
 	list_t *config_chain;
+	bool user_config_path;
 	const char *current_config_path;
 	const char *current_config;
 	int current_config_line_number;
@@ -584,11 +547,6 @@ struct sway_config {
 	int32_t floating_maximum_height;
 	int32_t floating_minimum_width;
 	int32_t floating_minimum_height;
-
-	// Security
-	list_t *command_policies;
-	list_t *feature_policies;
-	list_t *ipc_policies;
 
 	// The keysym to keycode translation
 	struct xkb_state *keysym_translation_state;

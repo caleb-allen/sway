@@ -5,8 +5,38 @@
 #include <stdbool.h>
 #include <wayland-server-protocol.h>
 
+enum movement_unit {
+	MOVEMENT_UNIT_PX,
+	MOVEMENT_UNIT_PPT,
+	MOVEMENT_UNIT_DEFAULT,
+	MOVEMENT_UNIT_INVALID,
+};
+
+struct movement_amount {
+	int amount;
+	enum movement_unit unit;
+};
+
+/*
+ * Parse units such as "px" or "ppt"
+ */
+enum movement_unit parse_movement_unit(const char *unit);
+
+/*
+ * Parse arguments such as "10", "10px" or "10 px".
+ * Returns the number of arguments consumed.
+ */
+int parse_movement_amount(int argc, char **argv,
+		struct movement_amount *amount);
+
 /**
- * Wrap i into the range [0, max[
+ * Get the current time, in milliseconds.
+ */
+
+uint32_t get_current_time_msec(void);
+
+/**
+ * Wrap i into the range [0, max]
  */
 int wrap(int i, int max);
 

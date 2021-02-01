@@ -17,10 +17,12 @@
 #include "sway/commands.h"
 #include "sway/desktop.h"
 #include "sway/desktop/transaction.h"
+#include "sway/desktop/idle_inhibit_v1.h"
 #include "sway/input/cursor.h"
 #include "sway/ipc-server.h"
 #include "sway/output.h"
 #include "sway/input/seat.h"
+#include "sway/server.h"
 #include "sway/tree/arrange.h"
 #include "sway/tree/container.h"
 #include "sway/tree/view.h"
@@ -35,7 +37,9 @@ void view_init(struct sway_view *view, enum sway_view_type type,
 	view->type = type;
 	view->impl = impl;
 	view->executed_criteria = create_list();
+	wl_list_init(&view->saved_buffers);
 	view->allow_request_urgent = true;
+	view->shortcuts_inhibit = SHORTCUTS_INHIBIT_DEFAULT;
 	wl_signal_init(&view->events.unmap);
 }
 
@@ -51,6 +55,9 @@ void view_destroy(struct sway_view *view) {
 				"Tried to free view which still has a container "
 				"(might have a pending transaction?)")) {
 		return;
+	}
+	if (!wl_list_empty(&view->saved_buffers)) {
+		view_remove_saved_buffer(view);
 	}
 	list_free(view->executed_criteria);
 
@@ -163,21 +170,62 @@ uint32_t view_configure(struct sway_view *view, double lx, double ly, int width,
 	return 0;
 }
 
-bool view_is_only_visible(struct sway_view *view) {
-	bool only_view = true;
+bool view_inhibit_idle(struct sway_view *view) {
+	struct sway_idle_inhibitor_v1 *user_inhibitor =
+		sway_idle_inhibit_v1_user_inhibitor_for_view(view);
+
+	struct sway_idle_inhibitor_v1 *application_inhibitor =
+		sway_idle_inhibit_v1_application_inhibitor_for_view(view);
+
+	if (!user_inhibitor && !application_inhibitor) {
+		return false;
+	}
+
+	if (!user_inhibitor) {
+		return sway_idle_inhibit_v1_is_active(application_inhibitor);
+	}
+
+	if (!application_inhibitor) {
+		return sway_idle_inhibit_v1_is_active(user_inhibitor);
+	}
+
+	return sway_idle_inhibit_v1_is_active(user_inhibitor)
+		|| sway_idle_inhibit_v1_is_active(application_inhibitor);
+}
+
+bool view_ancestor_is_only_visible(struct sway_view *view) {
+	bool only_visible = true;
 	struct sway_container *con = view->container;
 	while (con) {
 		enum sway_container_layout layout = container_parent_layout(con);
 		if (layout != L_TABBED && layout != L_STACKED) {
 			list_t *siblings = container_get_siblings(con);
 			if (siblings && siblings->length > 1) {
-				only_view = false;
-				break;
+				only_visible = false;
 			}
+		} else {
+			only_visible = true;
 		}
 		con = con->parent;
 	}
-	return only_view;
+	return only_visible;
+}
+
+static bool view_is_only_visible(struct sway_view *view) {
+	struct sway_container *con = view->container;
+	while (con) {
+		enum sway_container_layout layout = container_parent_layout(con);
+		if (layout != L_TABBED && layout != L_STACKED) {
+			list_t *siblings = container_get_siblings(con);
+			if (siblings && siblings->length > 1) {
+				return false;
+			}
+		}
+
+		con = con->parent;
+	}
+
+	return true;
 }
 
 static bool gaps_to_edge(struct sway_view *view) {
@@ -214,23 +262,30 @@ void view_autoconfigure(struct sway_view *view) {
 	double y_offset = 0;
 
 	if (!container_is_floating(con) && ws) {
-
-		bool smart = config->hide_edge_borders_smart == ESMART_ON ||
-			(config->hide_edge_borders_smart == ESMART_NO_GAPS &&
-			!gaps_to_edge(view));
-		bool hide_smart = smart && view_is_only_visible(view);
-
 		if (config->hide_edge_borders == E_BOTH
-				|| config->hide_edge_borders == E_VERTICAL || hide_smart) {
+				|| config->hide_edge_borders == E_VERTICAL) {
 			con->border_left = con->x != ws->x;
 			int right_x = con->x + con->width;
 			con->border_right = right_x != ws->x + ws->width;
 		}
+
 		if (config->hide_edge_borders == E_BOTH
-				|| config->hide_edge_borders == E_HORIZONTAL || hide_smart) {
+				|| config->hide_edge_borders == E_HORIZONTAL) {
 			con->border_top = con->y != ws->y;
 			int bottom_y = con->y + con->height;
 			con->border_bottom = bottom_y != ws->y + ws->height;
+		}
+
+		bool smart = config->hide_edge_borders_smart == ESMART_ON ||
+			(config->hide_edge_borders_smart == ESMART_NO_GAPS &&
+			!gaps_to_edge(view));
+		if (smart) {
+			bool show_border = container_is_floating_or_child(con) ||
+				!view_is_only_visible(view);
+			con->border_left &= show_border;
+			con->border_right &= show_border;
+			con->border_top &= show_border;
+			con->border_bottom &= show_border;
 		}
 
 		// In a tabbed or stacked container, the container's y is the top of the
@@ -298,6 +353,10 @@ void view_autoconfigure(struct sway_view *view) {
 void view_set_activated(struct sway_view *view, bool activated) {
 	if (view->impl->set_activated) {
 		view->impl->set_activated(view, activated);
+	}
+	if (view->foreign_toplevel) {
+		wlr_foreign_toplevel_handle_v1_set_activated(
+				view->foreign_toplevel, activated);
 	}
 }
 
@@ -390,13 +449,13 @@ void view_for_each_surface(struct sway_view *view,
 	}
 }
 
-void view_for_each_popup(struct sway_view *view,
+void view_for_each_popup_surface(struct sway_view *view,
 		wlr_surface_iterator_func_t iterator, void *user_data) {
 	if (!view->surface) {
 		return;
 	}
-	if (view->impl->for_each_popup) {
-		view->impl->for_each_popup(view, iterator, user_data);
+	if (view->impl->for_each_popup_surface) {
+		view->impl->for_each_popup_surface(view, iterator, user_data);
 	}
 }
 
@@ -559,6 +618,82 @@ static bool should_focus(struct sway_view *view) {
 	return len == 0;
 }
 
+static void handle_foreign_activate_request(
+		struct wl_listener *listener, void *data) {
+	struct sway_view *view = wl_container_of(
+			listener, view, foreign_activate_request);
+	struct wlr_foreign_toplevel_handle_v1_activated_event *event = data;
+	struct sway_seat *seat;
+	wl_list_for_each(seat, &server.input->seats, link) {
+		if (seat->wlr_seat == event->seat) {
+			if (container_is_scratchpad_hidden_or_child(view->container)) {
+				root_scratchpad_show(view->container);
+			}
+			seat_set_focus_container(seat, view->container);
+			seat_consider_warp_to_focus(seat);
+			container_raise_floating(view->container);
+			break;
+		}
+	}
+}
+
+static void handle_foreign_fullscreen_request(
+		struct wl_listener *listener, void *data) {
+	struct sway_view *view = wl_container_of(
+			listener, view, foreign_fullscreen_request);
+	struct wlr_foreign_toplevel_handle_v1_fullscreen_event *event = data;
+
+	// Match fullscreen command behavior for scratchpad hidden views
+	struct sway_container *container = view->container;
+	if (!container->workspace) {
+		while (container->parent) {
+			container = container->parent;
+		}
+	}
+
+	if (event->fullscreen && event->output && event->output->data) {
+		struct sway_output *output = event->output->data;
+		struct sway_workspace *ws = output_get_active_workspace(output);
+		if (ws && !container_is_scratchpad_hidden(view->container)) {
+			if (container_is_floating(view->container)) {
+				workspace_add_floating(ws, view->container);
+			} else {
+				workspace_add_tiling(ws, view->container);
+			}
+		}
+	}
+
+	container_set_fullscreen(container,
+		event->fullscreen ? FULLSCREEN_WORKSPACE : FULLSCREEN_NONE);
+	if (event->fullscreen) {
+		arrange_root();
+	} else {
+		if (container->parent) {
+			arrange_container(container->parent);
+		} else if (container->workspace) {
+			arrange_workspace(container->workspace);
+		}
+	}
+}
+
+static void handle_foreign_close_request(
+		struct wl_listener *listener, void *data) {
+	struct sway_view *view = wl_container_of(
+			listener, view, foreign_close_request);
+	view_close(view);
+}
+
+static void handle_foreign_destroy(
+		struct wl_listener *listener, void *data) {
+	struct sway_view *view = wl_container_of(
+			listener, view, foreign_destroy);
+
+	wl_list_remove(&view->foreign_activate_request.link);
+	wl_list_remove(&view->foreign_fullscreen_request.link);
+	wl_list_remove(&view->foreign_close_request.link);
+	wl_list_remove(&view->foreign_destroy.link);
+}
+
 void view_map(struct sway_view *view, struct wlr_surface *wlr_surface,
 			  bool fullscreen, struct wlr_output *fullscreen_output,
 			  bool decoration) {
@@ -587,6 +722,21 @@ void view_map(struct sway_view *view, struct wlr_surface *wlr_surface,
 	struct sway_container *target_sibling = node->type == N_CONTAINER ?
 		node->sway_container : NULL;
 
+	view->foreign_toplevel =
+		wlr_foreign_toplevel_handle_v1_create(server.foreign_toplevel_manager);
+	view->foreign_activate_request.notify = handle_foreign_activate_request;
+	wl_signal_add(&view->foreign_toplevel->events.request_activate,
+			&view->foreign_activate_request);
+	view->foreign_fullscreen_request.notify = handle_foreign_fullscreen_request;
+	wl_signal_add(&view->foreign_toplevel->events.request_fullscreen,
+			&view->foreign_fullscreen_request);
+	view->foreign_close_request.notify = handle_foreign_close_request;
+	wl_signal_add(&view->foreign_toplevel->events.request_close,
+			&view->foreign_close_request);
+	view->foreign_destroy.notify = handle_foreign_destroy;
+	wl_signal_add(&view->foreign_toplevel->events.destroy,
+			&view->foreign_destroy);
+
 	// If we're about to launch the view into the floating container, then
 	// launch it as a tiled view in the root of the workspace instead.
 	if (target_sibling && container_is_floating(target_sibling)) {
@@ -594,10 +744,11 @@ void view_map(struct sway_view *view, struct wlr_surface *wlr_surface,
 		ws = seat_get_last_known_workspace(seat);
 	}
 
+	struct sway_container *container = view->container;
 	if (target_sibling) {
-		container_add_sibling(target_sibling, view->container, 1);
+		container_add_sibling(target_sibling, container, 1);
 	} else if (ws) {
-		workspace_add_tiling(ws, view->container);
+		container = workspace_add_tiling(ws, container);
 	}
 	ipc_event_window(view->container, "new");
 
@@ -621,33 +772,54 @@ void view_map(struct sway_view *view, struct wlr_surface *wlr_surface,
 	}
 
 	if (config->popup_during_fullscreen == POPUP_LEAVE &&
-			view->container->workspace &&
-			view->container->workspace->fullscreen &&
-			view->container->workspace->fullscreen->view) {
-		struct sway_container *fs = view->container->workspace->fullscreen;
+			container->workspace &&
+			container->workspace->fullscreen &&
+			container->workspace->fullscreen->view) {
+		struct sway_container *fs = container->workspace->fullscreen;
 		if (view_is_transient_for(view, fs->view)) {
 			container_set_fullscreen(fs, false);
 		}
 	}
 
 	view_update_title(view, false);
-	container_update_representation(view->container);
+	container_update_representation(container);
 
 	if (fullscreen) {
 		container_set_fullscreen(view->container, true);
 		arrange_workspace(view->container->workspace);
 	} else {
-		if (view->container->parent) {
-			arrange_container(view->container->parent);
-		} else if (view->container->workspace) {
-			arrange_workspace(view->container->workspace);
+		if (container->parent) {
+			arrange_container(container->parent);
+		} else if (container->workspace) {
+			arrange_workspace(container->workspace);
 		}
 	}
 
 	view_execute_criteria(view);
 
-	if (should_focus(view)) {
+	bool set_focus = should_focus(view);
+
+#if HAVE_XWAYLAND
+	if (wlr_surface_is_xwayland_surface(wlr_surface)) {
+		struct wlr_xwayland_surface *xsurface =
+			wlr_xwayland_surface_from_wlr_surface(wlr_surface);
+    	set_focus = (wlr_xwayland_icccm_input_model(xsurface) !=
+			WLR_ICCCM_INPUT_MODEL_NONE) && set_focus;
+	}
+#endif
+
+	if (set_focus) {
 		input_manager_set_focus(&view->container->node);
+	}
+
+	const char *app_id;
+	const char *class;
+	if ((app_id = view_get_app_id(view)) != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_app_id(
+				view->foreign_toplevel, app_id);
+	} else if ((class = view_get_class(view)) != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_app_id(
+				view->foreign_toplevel, class);
 	}
 }
 
@@ -659,6 +831,11 @@ void view_unmap(struct sway_view *view) {
 	if (view->urgent_timer) {
 		wl_event_source_remove(view->urgent_timer);
 		view->urgent_timer = NULL;
+	}
+
+	if (view->foreign_toplevel) {
+		wlr_foreign_toplevel_handle_v1_destroy(view->foreign_toplevel);
+		view->foreign_toplevel = NULL;
 	}
 
 	struct sway_container *parent = view->container->parent;
@@ -701,8 +878,6 @@ void view_update_size(struct sway_view *view, int width, int height) {
 	if (container_is_floating(con)) {
 		con->content_width = width;
 		con->content_height = height;
-		con->current.content_width = width;
-		con->current.content_height = height;
 		container_set_geometry_from_content(con);
 	} else {
 		con->surface_x = con->content_x + (con->content_width - width) / 2;
@@ -710,8 +885,6 @@ void view_update_size(struct sway_view *view, int width, int height) {
 		con->surface_x = fmax(con->surface_x, con->content_x);
 		con->surface_y = fmax(con->surface_y, con->content_y);
 	}
-	con->surface_width = width;
-	con->surface_height = height;
 }
 
 static const struct sway_view_child_impl subsurface_impl;
@@ -891,7 +1064,9 @@ void view_child_init(struct sway_view_child *child,
 
 	// Not all child views have a map/unmap event
 	child->surface_map.notify = view_child_handle_surface_map;
+	wl_list_init(&child->surface_map.link);
 	child->surface_unmap.notify = view_child_handle_surface_unmap;
+	wl_list_init(&child->surface_unmap.link);
 
 	wl_signal_add(&view->events.unmap, &child->view_unmap);
 	child->view_unmap.notify = view_child_handle_view_unmap;
@@ -922,7 +1097,10 @@ void view_child_destroy(struct sway_view_child *child) {
 
 	wl_list_remove(&child->surface_commit.link);
 	wl_list_remove(&child->surface_destroy.link);
+	wl_list_remove(&child->surface_map.link);
+	wl_list_remove(&child->surface_unmap.link);
 	wl_list_remove(&child->view_unmap.link);
+	wl_list_remove(&child->surface_new_subsurface.link);
 
 	if (child->impl && child->impl->destroy) {
 		child->impl->destroy(child);
@@ -1066,6 +1244,10 @@ void view_update_title(struct sway_view *view, bool force) {
 	container_update_title_textures(view->container);
 
 	ipc_event_window(view->container, "title");
+
+	if (view->foreign_toplevel && title) {
+		wlr_foreign_toplevel_handle_v1_set_title(view->foreign_toplevel, title);
+	}
 }
 
 bool view_is_visible(struct sway_view *view) {
@@ -1086,13 +1268,9 @@ bool view_is_visible(struct sway_view *view) {
 			return false;
 		}
 	}
-	// Determine if view is nested inside a floating container which is sticky
-	struct sway_container *floater = view->container;
-	while (floater->parent) {
-		floater = floater->parent;
-	}
-	bool is_sticky = container_is_floating(floater) && floater->is_sticky;
-	if (!is_sticky && workspace && !workspace_is_visible(workspace)) {
+
+	if (!container_is_sticky_or_child(view->container) && workspace &&
+			!workspace_is_visible(workspace)) {
 		return false;
 	}
 	// Check view isn't in a tabbed or stacked container on an inactive tab
@@ -1151,23 +1329,40 @@ bool view_is_urgent(struct sway_view *view) {
 }
 
 void view_remove_saved_buffer(struct sway_view *view) {
-	if (!sway_assert(view->saved_buffer, "Expected a saved buffer")) {
+	if (!sway_assert(!wl_list_empty(&view->saved_buffers), "Expected a saved buffer")) {
 		return;
 	}
-	wlr_buffer_unlock(&view->saved_buffer->base);
-	view->saved_buffer = NULL;
+	struct sway_saved_buffer *saved_buf, *tmp;
+	wl_list_for_each_safe(saved_buf, tmp, &view->saved_buffers, link) {
+		wlr_buffer_unlock(&saved_buf->buffer->base);
+		wl_list_remove(&saved_buf->link);
+		free(saved_buf);
+	}
+}
+
+static void view_save_buffer_iterator(struct wlr_surface *surface,
+		int sx, int sy, void *data) {
+	struct sway_view *view = data;
+
+	if (surface && wlr_surface_has_buffer(surface)) {
+		wlr_buffer_lock(&surface->buffer->base);
+		struct sway_saved_buffer *saved_buffer = calloc(1, sizeof(struct sway_saved_buffer));
+		saved_buffer->buffer = surface->buffer;
+		saved_buffer->width = surface->current.width;
+		saved_buffer->height = surface->current.height;
+		saved_buffer->x = sx;
+		saved_buffer->y = sy;
+		saved_buffer->transform = surface->current.transform;
+		wlr_surface_get_buffer_source_box(surface, &saved_buffer->source_box);
+		wl_list_insert(&view->saved_buffers, &saved_buffer->link);
+	}
 }
 
 void view_save_buffer(struct sway_view *view) {
-	if (!sway_assert(!view->saved_buffer, "Didn't expect saved buffer")) {
+	if (!sway_assert(wl_list_empty(&view->saved_buffers), "Didn't expect saved buffer")) {
 		view_remove_saved_buffer(view);
 	}
-	if (view->surface && wlr_surface_has_buffer(view->surface)) {
-		wlr_buffer_lock(&view->surface->buffer->base);
-		view->saved_buffer = view->surface->buffer;
-		view->saved_buffer_width = view->surface->current.width;
-		view->saved_buffer_height = view->surface->current.height;
-	}
+	view_for_each_surface(view, view_save_buffer_iterator, view);
 }
 
 bool view_is_transient_for(struct sway_view *child,

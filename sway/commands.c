@@ -9,7 +9,6 @@
 #include "sway/commands.h"
 #include "sway/config.h"
 #include "sway/criteria.h"
-#include "sway/security.h"
 #include "sway/input/input-manager.h"
 #include "sway/input/seat.h"
 #include "sway/tree/view.h"
@@ -73,7 +72,6 @@ static struct cmd_handler handlers[] = {
 	{ "fullscreen", cmd_fullscreen },
 	{ "gaps", cmd_gaps },
 	{ "hide_edge_borders", cmd_hide_edge_borders },
-	{ "include", cmd_include },
 	{ "input", cmd_input },
 	{ "mode", cmd_mode },
 	{ "mouse_warping", cmd_mouse_warping },
@@ -103,6 +101,7 @@ static struct cmd_handler handlers[] = {
 /* Config-time only commands. Keep alphabetized */
 static struct cmd_handler config_handlers[] = {
 	{ "default_orientation", cmd_default_orientation },
+	{ "include", cmd_include },
 	{ "swaybg_command", cmd_swaybg_command },
 	{ "swaynag_command", cmd_swaynag_command },
 	{ "workspace_layout", cmd_workspace_layout },
@@ -127,6 +126,7 @@ static struct cmd_handler command_handlers[] = {
 	{ "rename", cmd_rename },
 	{ "resize", cmd_resize },
 	{ "scratchpad", cmd_scratchpad },
+	{ "shortcuts_inhibitor", cmd_shortcuts_inhibitor },
 	{ "split", cmd_split },
 	{ "splith", cmd_splith },
 	{ "splitt", cmd_splitt },
@@ -487,28 +487,6 @@ struct cmd_results *config_commands_command(char *exec) {
 		}
 		context |= context_names[j].context;
 	}
-
-	struct command_policy *policy = NULL;
-	for (int i = 0; i < config->command_policies->length; ++i) {
-		struct command_policy *p = config->command_policies->items[i];
-		if (strcmp(p->command, cmd) == 0) {
-			policy = p;
-			break;
-		}
-	}
-	if (!policy) {
-		policy = alloc_command_policy(cmd);
-		if (!sway_assert(policy, "Unable to allocate security policy")) {
-			results = cmd_results_new(CMD_INVALID,
-					"Unable to allocate memory");
-			goto cleanup;
-		}
-		list_add(config->command_policies, policy);
-	}
-	policy->context = context;
-
-	sway_log(SWAY_INFO, "Set command policy for %s to %d",
-			policy->command, policy->context);
 
 	results = cmd_results_new(CMD_SUCCESS, NULL);
 

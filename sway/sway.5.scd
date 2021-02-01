@@ -89,7 +89,7 @@ The following commands may only be used in the configuration file.
 	_swaynag\_command -_
 
 *workspace_layout* default|stacking|tabbed
-	Specifies the initial layout for new workspaces.
+	Specifies the initial layout for new containers in an empty workspace.
 
 *xwayland* enable|disable|force
 	Enables or disables Xwayland support, which allows X11 applications to be
@@ -140,10 +140,10 @@ They are expected to be used with *bindsym* or at runtime through *swaymsg*(1).
 *focus* output <name>
 	Moves focus to the named output.
 
-*focus tiling*
+*focus* tiling
 	Sets focus to the last focused tiling container.
 
-*focus floating*
+*focus* floating
 	Sets focus to the last focused floating container.
 
 *focus* mode_toggle
@@ -179,27 +179,35 @@ set|plus|minus <amount>
 *layout* toggle [split|all]
 	Cycles the layout mode of the focused container though a preset list of
 	layouts. If no argument is given, then it cycles through stacking, tabbed
-	and the last split layout. If "split" is given, then it cycles through
-	splith and splitv. If "all" is given, then it cycles through every layout.
+	and the last split layout. If _split_ is given, then it cycles through
+	splith and splitv. If _all_ is given, then it cycles through every layout.
 
 *layout* toggle [split|tabbed|stacking|splitv|splith] [split|tabbed|stacking|splitv|splith]...
 	Cycles the layout mode of the focused container through a list of layouts.
 
 *max_render_time* off|<msec>
-	Works together with *output max_render_time* to reduce the latency even
-	further by delaying the frame callbacks sent to a surface. When set to
-	a positive number of milliseconds, delays the frame callback in such a
-	way that the surface has the specified number of milliseconds to render
-	and commit new contents before being sampled by the compositor for the
-	next presentation. See *max_render_time* in *sway-output*(5) for
-	further details.
+	Controls when the relevant application is told to render this window, as a
+	positive number of milliseconds before the next time sway composites the
+	output. A smaller number leads to fresher rendered frames being composited
+	by sway and lower perceived input latency, but if set too low, the
+	application may not finish rendering before sway composites the output,
+	leading to delayed frames.
+
+	When set to off, the relevant application is told to render this window
+	immediately after display refresh. How much time is left for rendering
+	before sway composites the output at that point depends on the output
+	*max_render_time* setting.
 
 	To set this up for optimal latency:
-	. Set up *output max_render_time*.
+	. Set up *output max_render_time* (see *sway-output*(5)).
 	. Put the target application in _full-screen_ and have it continuously
 	  render something.
 	. Start by setting *max_render_time 1*. If the application drops
 	  frames, increment by *1*.
+
+	This setting only has an effect if a per-output *max_render_time* is in
+	effect on the output the window is currently on. See *sway-output*(5) for
+	further details.
 
 *move* left|right|up|down [<px> px]
 	Moves the focused container in the direction specified. If the container,
@@ -207,9 +215,11 @@ set|plus|minus <amount>
 	If unspecified, the default is 10 pixels. Pixels are ignored when moving
 	tiled containers.
 
-*move* [absolute] position <pos_x> [px] <pos_y> [px]
-	Moves the focused container to the specified position in the workspace. If
-	_absolute_ is used, the position is relative to all outputs.
+*move* [absolute] position <pos_x> [px|ppt] <pos_y> [px|ptt]
+	Moves the focused container to the specified position in the workspace.
+	The position can be specified in pixels or percentage points, omitting
+	the unit defaults to pixels. If	_absolute_ is used, the position is
+	relative to all outputs. _absolute_ can not be used with percentage points.
 
 *move* [absolute] position center
 	Moves the focused container to be centered on the workspace. If _absolute_
@@ -222,7 +232,7 @@ set|plus|minus <amount>
 	Moves the focused container to the specified mark.
 
 *move* [--no-auto-back-and-forth] [container|window] [to] workspace [number] <name>
-	Moves the focused container to the specified workspace. The string "number"
+	Moves the focused container to the specified workspace. The string _number_
 	is optional and is used to match a workspace with the same number, even if
 	it has a different name.
 
@@ -264,9 +274,11 @@ set|plus|minus <amount>
 	optional comment argument is ignored, but logged for debugging purposes.
 
 *reload*
-	Reloads the sway config file and applies any changes.
+	Reloads the sway config file and applies any changes. The config file is
+	located at path specified by the command line arguments when started,
+	otherwise according to the priority stated in *sway*(1).
 
-*rename workspace* [<old_name>] to <new_name>
+*rename* workspace [<old_name>] to <new_name>
 	Rename either <old_name> or the focused workspace to the <new_name>
 
 *resize* shrink|grow width|height [<amount> [px|ppt]]
@@ -274,27 +286,38 @@ set|plus|minus <amount>
 	percentage points. If the units are omitted, floating containers are resized
 	in px and tiled containers by ppt. _amount_ will default to 10 if omitted.
 
-*resize set* height <height> [px|ppt]
+*resize* set height <height> [px|ppt]
 	Sets the height of the container to _height_, specified in pixels or
 	percentage points. If the units are omitted, floating containers are
 	resized in px and tiled containers by ppt. If _height_ is 0, the container
 	will not be resized.
 
-*resize set* [width] <width> [px|ppt]
+*resize* set [width] <width> [px|ppt]
 	Sets the width of the container to _width_, specified in pixels or
 	percentage points. If the units are omitted, floating containers are
 	resized in px and tiled containers by ppt. If _width_ is 0, the container
 	will not be resized.
 
-*resize set* [width] <width> [px|ppt] [height] <height> [px|ppt]
+*resize* set [width] <width> [px|ppt] [height] <height> [px|ppt]
 	Sets the width and height of the container to _width_ and _height_,
 	specified in pixels or percentage points. If the units are omitted,
 	floating containers are resized in px and tiled containers by ppt. If
 	_width_ or _height_ is 0, the container will not be resized on that axis.
 
-*scratchpad show*
+*scratchpad* show
 	Shows a window from the scratchpad. Repeatedly using this command will
 	cycle through the windows in the scratchpad.
+
+*shortcuts_inhibitor* enable|disable
+	Enables or disables the ability of clients to inhibit keyboard
+	shortcuts for a view. This is primarily useful for virtualization and
+	remote desktop software. It affects either the currently focused view
+	or a set of views selected by criteria. Subcommand _disable_
+	additionally deactivates any active inhibitors for the given view(s).
+	Criteria are particularly useful with the *for_window* command to
+	configure a class of views differently from the per-seat defaults
+	established by the *seat* subcommand of the same name. See
+	*sway-input*(5) for more ways to affect inhibitors.
 
 *split* vertical|v|horizontal|h|toggle|t
 	Splits the current container, vertically or horizontally. When _toggle_ is
@@ -609,6 +632,13 @@ The default colors are:
 	information on pango font descriptions, see
 	https://developer.gnome.org/pango/stable/pango-Fonts.html#pango-font-description-from-string
 
+*force_display_urgency_hint* <timeout> [ms]
+	If an application on another workspace sets an urgency hint, switching to this
+	workspace may lead to immediate focus of the application, which also means the
+	window decoration color would be immediately resetted to *client.focused*. This
+	may make it unnecessarily hard to tell which window originally raised the
+	event. This option allows to set a _timeout_ in ms to delay the urgency hint reset.
+
 *titlebar_border_thickness* <thickness>
 	Thickness of the titlebar border in pixels
 
@@ -807,7 +837,7 @@ The default colors are:
 *workspace_auto_back_and_forth* yes|no
 	When _yes_, repeating a workspace switch command will switch back to the
 	prior workspace. For example, if you are currently on workspace 1,
-	switch to workspace 2, then invoke the "workspace 2" command again, you
+	switch to workspace 2, then invoke the *workspace 2* command again, you
 	will be returned to workspace 1. Default is _no_.
 
 # CRITERIA
@@ -892,8 +922,8 @@ The following attributes may be matched with:
 	currently focused window.
 
 *urgent*
-	Compares the urgent state of the window. Can be "first", "last", "latest",
-	"newest", "oldest" or "recent".
+	Compares the urgent state of the window. Can be _first_, _last_, _latest_,
+	_newest_, _oldest_ or _recent_.
 
 *window_role*
 	Compare against the window role (WM_WINDOW_ROLE). Can be a regular

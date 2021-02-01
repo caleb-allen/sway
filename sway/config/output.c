@@ -237,7 +237,10 @@ struct output_config *store_output_config(struct output_config *oc) {
 
 static void set_mode(struct wlr_output *output, int width, int height,
 		float refresh_rate, bool custom) {
-	int mhz = (int)(refresh_rate * 1000);
+	// Not all floating point integers can be represented exactly
+	// as (int)(1000 * mHz / 1000.f)
+	// round() the result to avoid any error
+	int mhz = (int)round(refresh_rate * 1000);
 
 	if (wl_list_empty(&output->modes) || custom) {
 		sway_log(SWAY_DEBUG, "Assigning custom mode to %s", output->name);
@@ -397,17 +400,8 @@ bool apply_output_config(struct output_config *oc, struct sway_output *output) {
 
 	struct wlr_output *wlr_output = output->wlr_output;
 
-	bool was_enabled = output->enabled;
-	if (oc && !oc->enabled) {
-		// Output is configured to be disabled
-		sway_log(SWAY_DEBUG, "Disabling output %s", oc->name);
-		if (output->enabled) {
-			output_disable(output);
-			wlr_output_layout_remove(root->output_layout, wlr_output);
-		}
-	} else {
-		output->enabled = true;
-	}
+	// Flag to prevent the output mode event handler from calling us
+	output->enabling = (!oc || oc->enabled);
 
 	queue_output_config(oc, output);
 
@@ -421,11 +415,18 @@ bool apply_output_config(struct output_config *oc, struct sway_output *output) {
 		// Leave the output disabled for now and try again when the output gets
 		// the mode we asked for.
 		sway_log(SWAY_ERROR, "Failed to commit output %s", wlr_output->name);
-		output->enabled = was_enabled;
+		output->enabling = false;
 		return false;
 	}
 
+	output->enabling = false;
+
 	if (oc && !oc->enabled) {
+		sway_log(SWAY_DEBUG, "Disabling output %s", oc->name);
+		if (output->enabled) {
+			output_disable(output);
+			wlr_output_layout_remove(root->output_layout, wlr_output);
+		}
 		return true;
 	}
 
@@ -468,8 +469,8 @@ bool apply_output_config(struct output_config *oc, struct sway_output *output) {
 	output->width = output_box->width;
 	output->height = output_box->height;
 
-	if (!output->configured) {
-		output_configure(output);
+	if (!output->enabled) {
+		output_enable(output);
 	}
 
 	if (oc && oc->max_render_time >= 0) {
@@ -481,14 +482,7 @@ bool apply_output_config(struct output_config *oc, struct sway_output *output) {
 	// Reconfigure all devices, since input config may have been applied before
 	// this output came online, and some config items (like map_to_output) are
 	// dependent on an output being present.
-	struct sway_input_device *input_device = NULL;
-	wl_list_for_each(input_device, &server.input->devices, link) {
-		struct sway_seat *seat = NULL;
-		wl_list_for_each(seat, &server.input->seats, link) {
-			seat_configure_device(seat, input_device);
-		}
-	}
-
+	input_manager_configure_all_inputs();
 	return true;
 }
 
@@ -645,7 +639,7 @@ void apply_output_config_to_outputs(struct output_config *oc) {
 
 	struct sway_seat *seat;
 	wl_list_for_each(seat, &server.input->seats, link) {
-		wlr_seat_pointer_clear_focus(seat->wlr_seat);
+		wlr_seat_pointer_notify_clear_focus(seat->wlr_seat);
 		cursor_rebase(seat->cursor);
 	}
 }

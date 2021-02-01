@@ -7,6 +7,7 @@
 #include <wlr/util/edges.h>
 #include "sway/config.h"
 #include "sway/input/input-manager.h"
+#include "sway/input/tablet.h"
 #include "sway/input/text_input.h"
 
 struct sway_seat;
@@ -15,10 +16,14 @@ struct sway_seatop_impl {
 	void (*button)(struct sway_seat *seat, uint32_t time_msec,
 			struct wlr_input_device *device, uint32_t button,
 			enum wlr_button_state state);
-	void (*motion)(struct sway_seat *seat, uint32_t time_msec,
-			double dx, double dy);
-	void (*axis)(struct sway_seat *seat, struct wlr_event_pointer_axis *event);
+	void (*pointer_motion)(struct sway_seat *seat, uint32_t time_msec);
+	void (*pointer_axis)(struct sway_seat *seat,
+			struct wlr_event_pointer_axis *event);
 	void (*rebase)(struct sway_seat *seat, uint32_t time_msec);
+	void (*tablet_tool_motion)(struct sway_seat *seat,
+			struct sway_tablet_tool *tool, uint32_t time_msec);
+	void (*tablet_tool_tip)(struct sway_seat *seat, struct sway_tablet_tool *tool,
+			uint32_t time_msec, enum wlr_tablet_tool_tip_state state);
 	void (*end)(struct sway_seat *seat);
 	void (*unref)(struct sway_seat *seat, struct sway_container *con);
 	void (*render)(struct sway_seat *seat, struct sway_output *output,
@@ -55,6 +60,12 @@ struct sway_drag_icon {
 	struct wl_listener surface_commit;
 	struct wl_listener map;
 	struct wl_listener unmap;
+	struct wl_listener destroy;
+};
+
+struct sway_drag {
+	struct sway_seat *seat;
+	struct wlr_drag *wlr_drag;
 	struct wl_listener destroy;
 };
 
@@ -105,8 +116,10 @@ struct sway_seat {
 };
 
 struct sway_pointer_constraint {
+	struct sway_cursor *cursor;
 	struct wlr_pointer_constraint_v1 *constraint;
 
+	struct wl_listener set_region;
 	struct wl_listener destroy;
 };
 
@@ -220,6 +233,9 @@ bool seat_is_input_allowed(struct sway_seat *seat, struct wlr_surface *surface);
 
 void drag_icon_update_position(struct sway_drag_icon *icon);
 
+enum wlr_edges find_resize_edge(struct sway_container *cont,
+		struct wlr_surface *surface, struct sway_cursor *cursor);
+
 void seatop_begin_default(struct sway_seat *seat);
 
 void seatop_begin_down(struct sway_seat *seat, struct sway_container *con,
@@ -252,13 +268,17 @@ void seatop_button(struct sway_seat *seat, uint32_t time_msec,
 		struct wlr_input_device *device, uint32_t button,
 		enum wlr_button_state state);
 
-/**
- * dx and dy are distances relative to previous position.
- */
-void seatop_motion(struct sway_seat *seat, uint32_t time_msec,
-		double dx, double dy);
+void seatop_pointer_motion(struct sway_seat *seat, uint32_t time_msec);
 
-void seatop_axis(struct sway_seat *seat, struct wlr_event_pointer_axis *event);
+void seatop_pointer_axis(struct sway_seat *seat,
+		struct wlr_event_pointer_axis *event);
+
+void seatop_tablet_tool_tip(struct sway_seat *seat,
+		struct sway_tablet_tool *tool, uint32_t time_msec,
+		enum wlr_tablet_tool_tip_state state);
+
+void seatop_tablet_tool_motion(struct sway_seat *seat,
+		struct sway_tablet_tool *tool, uint32_t time_msec);
 
 void seatop_rebase(struct sway_seat *seat, uint32_t time_msec);
 
@@ -282,6 +302,14 @@ void seatop_render(struct sway_seat *seat, struct sway_output *output,
 		pixman_region32_t *damage);
 
 bool seatop_allows_set_cursor(struct sway_seat *seat);
+
+/**
+ * Returns the keyboard shortcuts inhibitor that applies to the given surface
+ * or NULL if none exists.
+ */
+struct sway_keyboard_shortcuts_inhibitor *
+keyboard_shortcuts_inhibitor_get_for_surface(const struct sway_seat *seat,
+		const struct wlr_surface *surface);
 
 /**
  * Returns the keyboard shortcuts inhibitor that applies to the currently

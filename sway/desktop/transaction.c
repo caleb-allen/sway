@@ -210,14 +210,17 @@ static void apply_container_state(struct sway_container *container,
 	struct sway_view *view = container->view;
 	// Damage the old location
 	desktop_damage_whole_container(container);
-	if (view && view->saved_buffer) {
-		struct wlr_box box = {
-			.x = container->current.content_x - view->saved_geometry.x,
-			.y = container->current.content_y - view->saved_geometry.y,
-			.width = view->saved_buffer_width,
-			.height = view->saved_buffer_height,
-		};
-		desktop_damage_box(&box);
+	if (view && !wl_list_empty(&view->saved_buffers)) {
+		struct sway_saved_buffer *saved_buf;
+		wl_list_for_each(saved_buf, &view->saved_buffers, link) {
+			struct wlr_box box = {
+				.x = container->current.content_x - view->saved_geometry.x + saved_buf->x,
+				.y = container->current.content_y - view->saved_geometry.y + saved_buf->y,
+				.width = saved_buf->width,
+				.height = saved_buf->height,
+			};
+			desktop_damage_box(&box);
+		}
 	}
 
 	// There are separate children lists for each instruction state, the
@@ -229,7 +232,7 @@ static void apply_container_state(struct sway_container *container,
 
 	memcpy(&container->current, state, sizeof(struct sway_container_state));
 
-	if (view && view->saved_buffer) {
+	if (view && !wl_list_empty(&view->saved_buffers)) {
 		if (!container->node.destroying || container->node.ntxnrefs == 1) {
 			view_remove_saved_buffer(view);
 		}
@@ -252,20 +255,18 @@ static void apply_container_state(struct sway_container *container,
 	// the container. This is important for fullscreen views which
 	// refuse to resize to the size of the output.
 	if (view && view->surface) {
-		if (view->surface->current.width < container->width) {
-			container->surface_x = container->content_x +
-				(container->content_width - view->surface->current.width) / 2;
+		if (view->geometry.width < container->current.content_width) {
+			container->surface_x = container->current.content_x +
+				(container->current.content_width - view->geometry.width) / 2;
 		} else {
-			container->surface_x = container->content_x;
+			container->surface_x = container->current.content_x;
 		}
-		if (view->surface->current.height < container->height) {
-			container->surface_y = container->content_y +
-				(container->content_height - view->surface->current.height) / 2;
+		if (view->geometry.height < container->current.content_height) {
+			container->surface_y = container->current.content_y +
+				(container->current.content_height - view->geometry.height) / 2;
 		} else {
-			container->surface_y = container->content_y;
+			container->surface_y = container->current.content_y;
 		}
-		container->surface_width = view->surface->current.width;
-		container->surface_height = view->surface->current.height;
 	}
 
 	if (!container->node.destroying) {
@@ -338,8 +339,8 @@ static void transaction_progress_queue(void) {
 	if (!server.transactions->length) {
 		return;
 	}
-	// There's only ever one committed transaction,
-	// and it's the first one in the queue.
+	// Only the first transaction in the queue is committed, so that's the one
+	// we try to process.
 	struct sway_transaction *transaction = server.transactions->items[0];
 	if (transaction->num_waiting) {
 		return;
@@ -348,7 +349,8 @@ static void transaction_progress_queue(void) {
 	transaction_destroy(transaction);
 	list_del(server.transactions, 0);
 
-	if (!server.transactions->length) {
+	if (server.transactions->length == 0) {
+		// The transaction queue is empty, so we're done.
 		sway_idle_inhibit_v1_check_active(server.idle_inhibit_manager_v1);
 		return;
 	}
@@ -356,16 +358,26 @@ static void transaction_progress_queue(void) {
 	// If there's a bunch of consecutive transactions which all apply to the
 	// same views, skip all except the last one.
 	while (server.transactions->length >= 2) {
-		struct sway_transaction *a = server.transactions->items[0];
-		struct sway_transaction *b = server.transactions->items[1];
-		if (transaction_same_nodes(a, b)) {
+		struct sway_transaction *txn = server.transactions->items[0];
+		struct sway_transaction *dup = NULL;
+
+		for (int i = 1; i < server.transactions->length; i++) {
+			struct sway_transaction *maybe_dup = server.transactions->items[i];
+			if (transaction_same_nodes(txn, maybe_dup)) {
+				dup = maybe_dup;
+				break;
+			}
+		}
+
+		if (dup) {
 			list_del(server.transactions, 0);
-			transaction_destroy(a);
+			transaction_destroy(txn);
 		} else {
 			break;
 		}
 	}
 
+	// We again commit the first transaction in the queue to process it.
 	transaction = server.transactions->items[0];
 	transaction_commit(transaction);
 	transaction_progress_queue();
@@ -394,8 +406,12 @@ static bool should_configure(struct sway_node *node,
 	// Xwayland views are position-aware and need to be reconfigured
 	// when their position changes.
 	if (node->sway_container->view->type == SWAY_VIEW_XWAYLAND) {
-		if (cstate->content_x != istate->content_x ||
-				cstate->content_y != istate->content_y) {
+		// Sway logical coordinates are doubles, but they get truncated to
+		// integers when sent to Xwayland through `xcb_configure_window`.
+		// X11 apps will not respond to duplicate configure requests (from their
+		// truncated point of view) and cause transactions to time out.
+		if ((int)cstate->content_x != (int)istate->content_x ||
+				(int)cstate->content_y != (int)istate->content_y) {
 			return true;
 		}
 	}
@@ -432,7 +448,7 @@ static void transaction_commit(struct sway_transaction *transaction) {
 			wlr_surface_send_frame_done(
 					node->sway_container->view->surface, &now);
 		}
-		if (node_is_view(node) && !node->sway_container->view->saved_buffer) {
+		if (node_is_view(node) && wl_list_empty(&node->sway_container->view->saved_buffers)) {
 			view_save_buffer(node->sway_container->view);
 			memcpy(&node->sway_container->view->saved_geometry,
 					&node->sway_container->view->geometry,
@@ -498,17 +514,28 @@ void transaction_notify_view_ready_by_serial(struct sway_view *view,
 		uint32_t serial) {
 	struct sway_transaction_instruction *instruction =
 		view->container->node.instruction;
-	if (instruction->serial == serial) {
+	if (instruction != NULL && instruction->serial == serial) {
 		set_instruction_ready(instruction);
 	}
 }
 
-void transaction_notify_view_ready_by_size(struct sway_view *view,
-		int width, int height) {
+void transaction_notify_view_ready_by_geometry(struct sway_view *view,
+		double x, double y, int width, int height) {
 	struct sway_transaction_instruction *instruction =
 		view->container->node.instruction;
-	if (instruction->container_state.content_width == width &&
+	if (instruction != NULL &&
+			(int)instruction->container_state.content_x == (int)x &&
+			(int)instruction->container_state.content_y == (int)y &&
+			instruction->container_state.content_width == width &&
 			instruction->container_state.content_height == height) {
+		set_instruction_ready(instruction);
+	}
+}
+
+void transaction_notify_view_ready_immediately(struct sway_view *view) {
+	struct sway_transaction_instruction *instruction =
+			view->container->node.instruction;
+	if (instruction != NULL) {
 		set_instruction_ready(instruction);
 	}
 }
@@ -530,8 +557,7 @@ void transaction_commit_dirty(void) {
 
 	list_add(server.transactions, transaction);
 
-	// There's only ever one committed transaction,
-	// and it's the first one in the queue.
+	// We only commit the first transaction added to the queue.
 	if (server.transactions->length == 1) {
 		transaction_commit(transaction);
 		// Attempting to progress the queue here is useful

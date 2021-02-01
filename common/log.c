@@ -42,7 +42,14 @@ static const char *verbosity_colors[] = {
 	[SWAY_SILENT] = "",
 	[SWAY_ERROR ] = "\x1B[1;31m",
 	[SWAY_INFO  ] = "\x1B[1;34m",
-	[SWAY_DEBUG ] = "\x1B[1;30m",
+	[SWAY_DEBUG ] = "\x1B[1;90m",
+};
+
+static const char *verbosity_headers[] = {
+	[SWAY_SILENT] = "",
+	[SWAY_ERROR] = "[ERROR]",
+	[SWAY_INFO] = "[INFO]",
+	[SWAY_DEBUG] = "[DEBUG]",
 };
 
 static void timespec_sub(struct timespec *r, const struct timespec *a,
@@ -84,6 +91,8 @@ static void sway_log_stderr(sway_log_importance_t verbosity, const char *fmt,
 
 	if (colored && isatty(STDERR_FILENO)) {
 		fprintf(stderr, "%s", verbosity_colors[c]);
+	} else {
+		fprintf(stderr, "%s ", verbosity_headers[c]);
 	}
 
 	vfprintf(stderr, fmt, args);

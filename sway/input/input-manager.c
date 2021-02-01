@@ -4,17 +4,20 @@
 #include <string.h>
 #include <math.h>
 #include <wlr/backend/libinput.h>
+#include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_input_inhibitor.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
-#include <wlr/types/wlr_cursor.h>
 #include "sway/config.h"
+#include "sway/input/cursor.h"
 #include "sway/input/input-manager.h"
+#include "sway/input/keyboard.h"
 #include "sway/input/libinput.h"
 #include "sway/input/seat.h"
-#include "sway/input/cursor.h"
 #include "sway/ipc-server.h"
 #include "sway/server.h"
+#include "sway/tree/view.h"
 #include "stringop.h"
 #include "list.h"
 #include "log.h"
@@ -67,7 +70,8 @@ char *input_device_get_identifier(struct wlr_input_device *device) {
 
 	char *p = name;
 	for (; *p; ++p) {
-		if (*p == ' ') {
+		// There are in fact input devices with unprintable characters in its name
+		if (*p == ' ' || !isprint(*p)) {
 			*p = '_';
 		}
 	}
@@ -333,12 +337,25 @@ static void handle_keyboard_shortcuts_inhibit_new_inhibitor(
 	struct sway_seat *seat = inhibitor->seat->data;
 	wl_list_insert(&seat->keyboard_shortcuts_inhibitors, &sway_inhibitor->link);
 
-	struct seat_config *config = seat_get_config(seat);
-	if (!config) {
-		config = seat_get_config_by_name("*");
+	// per-view, seat-agnostic config via criteria
+	struct sway_view *view = view_from_wlr_surface(inhibitor->surface);
+	enum seat_config_shortcuts_inhibit inhibit = SHORTCUTS_INHIBIT_DEFAULT;
+	if (view) {
+		inhibit = view->shortcuts_inhibit;
 	}
 
-	if (config && config->shortcuts_inhibit == SHORTCUTS_INHIBIT_DISABLE) {
+	if (inhibit == SHORTCUTS_INHIBIT_DEFAULT) {
+		struct seat_config *config = seat_get_config(seat);
+		if (!config) {
+			config = seat_get_config_by_name("*");
+		}
+
+		if (config) {
+			inhibit = config->shortcuts_inhibit;
+		}
+	}
+
+	if (inhibit == SHORTCUTS_INHIBIT_DISABLE) {
 		/**
 		 * Here we deny to honour the inhibitor by never sending the
 		 * activate signal. We can not, however, destroy the inhibitor
@@ -505,6 +522,22 @@ static void retranslate_keysyms(struct input_config *input_config) {
 	}
 }
 
+static void input_manager_configure_input(
+		struct sway_input_device *input_device) {
+	sway_input_configure_libinput_device(input_device);
+	struct sway_seat *seat = NULL;
+	wl_list_for_each(seat, &server.input->seats, link) {
+		seat_configure_device(seat, input_device);
+	}
+}
+
+void input_manager_configure_all_inputs(void) {
+	struct sway_input_device *input_device = NULL;
+	wl_list_for_each(input_device, &server.input->devices, link) {
+		input_manager_configure_input(input_device);
+	}
+}
+
 void input_manager_apply_input_config(struct input_config *input_config) {
 	struct sway_input_device *input_device = NULL;
 	bool wildcard = strcmp(input_config->identifier, "*") == 0;
@@ -515,11 +548,7 @@ void input_manager_apply_input_config(struct input_config *input_config) {
 		if (strcmp(input_device->identifier, input_config->identifier) == 0
 				|| wildcard
 				|| type_matches) {
-			sway_input_configure_libinput_device(input_device);
-			struct sway_seat *seat = NULL;
-			wl_list_for_each(seat, &server.input->seats, link) {
-				seat_configure_device(seat, input_device);
-			}
+			input_manager_configure_input(input_device);
 		}
 	}
 
@@ -534,13 +563,23 @@ void input_manager_reset_input(struct sway_input_device *input_device) {
 	}
 }
 
-void input_manager_reset_all_inputs() {
+void input_manager_reset_all_inputs(void) {
 	struct sway_input_device *input_device = NULL;
 	wl_list_for_each(input_device, &server.input->devices, link) {
 		input_manager_reset_input(input_device);
 	}
-}
 
+	// If there is at least one keyboard using the default keymap, repeat delay,
+	// and repeat rate, then it is possible that there is a keyboard group that
+	// need their keyboard disarmed.
+	struct sway_seat *seat;
+	wl_list_for_each(seat, &server.input->seats, link) {
+		struct sway_keyboard_group *group;
+		wl_list_for_each(group, &seat->keyboard_groups, link) {
+			sway_keyboard_disarm_key_repeat(group->seat_device->keyboard);
+		}
+	}
+}
 
 void input_manager_apply_seat_config(struct seat_config *seat_config) {
 	sway_log(SWAY_DEBUG, "applying seat config for seat %s", seat_config->name);

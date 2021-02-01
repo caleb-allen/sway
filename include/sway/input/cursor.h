@@ -6,6 +6,7 @@
 #include <wlr/types/wlr_pointer_gestures_v1.h>
 #include <wlr/types/wlr_surface.h>
 #include "sway/input/seat.h"
+#include "config.h"
 
 #define SWAY_CURSOR_PRESSED_BUTTONS_CAP 32
 
@@ -32,6 +33,7 @@ struct sway_cursor {
 
 	struct wlr_pointer_constraint_v1 *active_constraint;
 	pixman_region32_t confine; // invalid if active_constraint == NULL
+	bool active_confine_requires_warp;
 
 	struct wlr_pointer_gestures_v1 *pointer_gestures;
 	struct wl_listener pinch_begin;
@@ -50,12 +52,14 @@ struct sway_cursor {
 	struct wl_listener touch_down;
 	struct wl_listener touch_up;
 	struct wl_listener touch_motion;
+	bool simulating_pointer_from_touch;
+	int32_t pointer_touch_id;
 
 	struct wl_listener tool_axis;
 	struct wl_listener tool_tip;
 	struct wl_listener tool_proximity;
 	struct wl_listener tool_button;
-	bool simulated_tool_tip_down;
+	bool simulating_pointer_from_tool_tip;
 	uint32_t tool_buttons;
 
 	struct wl_listener request_set_cursor;
@@ -65,6 +69,10 @@ struct sway_cursor {
 
 	struct wl_event_source *hide_source;
 	bool hidden;
+	// This field is just a cache of the field in seat_config in order to avoid
+	// costly seat_config lookups on every keypress. HIDE_WHEN_TYPING_DEFAULT
+	// indicates that there is no cached value.
+	enum seat_config_hide_cursor_when_typing hide_when_typing;
 
 	size_t pressed_button_count;
 };
@@ -85,11 +93,15 @@ struct sway_cursor *sway_cursor_create(struct sway_seat *seat);
  */
 void cursor_rebase(struct sway_cursor *cursor);
 void cursor_rebase_all(void);
+void cursor_update_image(struct sway_cursor *cursor, struct sway_node *node);
 
-void cursor_handle_activity(struct sway_cursor *cursor,
-	enum sway_input_idle_source idle_source);
+void cursor_handle_activity_from_idle_source(struct sway_cursor *cursor,
+		enum sway_input_idle_source idle_source);
+void cursor_handle_activity_from_device(struct sway_cursor *cursor,
+		struct wlr_input_device *device);
 void cursor_unhide(struct sway_cursor *cursor);
 int cursor_get_timeout(struct sway_cursor *cursor);
+void cursor_notify_key_press(struct sway_cursor *cursor);
 
 void dispatch_cursor_button(struct sway_cursor *cursor,
 	struct wlr_input_device *device, uint32_t time_msec, uint32_t button,
@@ -106,7 +118,7 @@ void cursor_set_image_surface(struct sway_cursor *cursor,
 		struct wl_client *client);
 
 void cursor_warp_to_container(struct sway_cursor *cursor,
-	struct sway_container *container);
+	struct sway_container *container, bool force);
 
 void cursor_warp_to_workspace(struct sway_cursor *cursor,
 		struct sway_workspace *workspace);

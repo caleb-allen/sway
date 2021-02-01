@@ -270,6 +270,12 @@ static bool ipc_parse_config(
 		config->workspace_buttons = json_object_get_boolean(workspace_buttons);
 	}
 
+	json_object *workspace_min_width =
+		json_object_object_get(bar_config, "workspace_min_width");
+	if (workspace_min_width) {
+		config->workspace_min_width = json_object_get_int(workspace_min_width);
+	}
+
 	json_object *wrap_scroll = json_object_object_get(bar_config, "wrap_scroll");
 	if (wrap_scroll) {
 		config->wrap_scroll = json_object_get_boolean(wrap_scroll);
@@ -360,7 +366,7 @@ bool ipc_get_workspaces(struct swaybar *bar) {
 
 		wl_list_for_each(output, &bar->outputs, link) {
 			const char *ws_output = json_object_get_string(out);
-			if (strcmp(ws_output, output->name) == 0) {
+			if (ws_output != NULL && strcmp(ws_output, output->name) == 0) {
 				struct swaybar_workspace *ws =
 					calloc(1, sizeof(struct swaybar_workspace));
 				ws->num = json_object_get_int(num);

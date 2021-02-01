@@ -18,6 +18,7 @@
 #include <wlr/types/wlr_output.h>
 #include <xkbcommon/xkbcommon.h>
 #include "wlr-layer-shell-unstable-v1-protocol.h"
+#include "sway/desktop/idle_inhibit_v1.h"
 
 static const int i3_output_id = INT32_MAX;
 static const int i3_scratch_id = INT32_MAX - 1;
@@ -68,19 +69,24 @@ static const char *ipc_json_output_transform_description(enum wl_output_transfor
 	case WL_OUTPUT_TRANSFORM_NORMAL:
 		return "normal";
 	case WL_OUTPUT_TRANSFORM_90:
-		return "90";
+		// Sway uses clockwise transforms, while WL_OUTPUT_TRANSFORM_* describes
+		// anti-clockwise transforms.
+		return "270";
 	case WL_OUTPUT_TRANSFORM_180:
 		return "180";
 	case WL_OUTPUT_TRANSFORM_270:
-		return "270";
+		// Transform also inverted here.
+		return "90";
 	case WL_OUTPUT_TRANSFORM_FLIPPED:
 		return "flipped";
 	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
-		return "flipped-90";
+		// Inverted.
+		return "flipped-270";
 	case WL_OUTPUT_TRANSFORM_FLIPPED_180:
 		return "flipped-180";
 	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
-		return "flipped-270";
+		// Inverted.
+		return "flipped-90";
 	}
 	return NULL;
 }
@@ -134,11 +140,27 @@ static const char *ipc_json_xwindow_type_description(struct sway_view *view) {
 }
 #endif
 
+static const char *ipc_json_user_idle_inhibitor_description(enum sway_idle_inhibit_mode mode) {
+	switch (mode) {
+	case INHIBIT_IDLE_FOCUS:
+		return "focus";
+	case INHIBIT_IDLE_FULLSCREEN:
+		return "fullscreen";
+	case INHIBIT_IDLE_OPEN:
+		return "open";
+	case INHIBIT_IDLE_VISIBLE:
+		return "visible";
+	case INHIBIT_IDLE_APPLICATION:
+		return NULL;
+	}
+	return NULL;
+}
+
 json_object *ipc_json_get_version(void) {
 	int major = 0, minor = 0, patch = 0;
 	json_object *version = json_object_new_object();
 
-	sscanf(SWAY_VERSION, "%u.%u.%u", &major, &minor, &patch);
+	sscanf(SWAY_VERSION, "%d.%d.%d", &major, &minor, &patch);
 
 	json_object_object_add(version, "human_readable", json_object_new_string(SWAY_VERSION));
 	json_object_object_add(version, "variant", json_object_new_string("sway"));
@@ -471,14 +493,6 @@ static void ipc_json_describe_view(struct sway_container *c, json_object *object
 	bool visible = view_is_visible(c->view);
 	json_object_object_add(object, "visible", json_object_new_boolean(visible));
 
-	json_object *marks = json_object_new_array();
-	list_t *con_marks = c->marks;
-	for (int i = 0; i < con_marks->length; ++i) {
-		json_object_array_add(marks, json_object_new_string(con_marks->items[i]));
-	}
-
-	json_object_object_add(object, "marks", marks);
-
 	struct wlr_box window_box = {
 		c->content_x - c->x,
 		(c->current.border == B_PIXEL) ? c->current.border_thickness : 0,
@@ -494,6 +508,36 @@ static void ipc_json_describe_view(struct sway_container *c, json_object *object
 	json_object_object_add(object, "max_render_time", json_object_new_int(c->view->max_render_time));
 
 	json_object_object_add(object, "shell", json_object_new_string(view_get_shell(c->view)));
+
+	json_object_object_add(object, "inhibit_idle",
+		json_object_new_boolean(view_inhibit_idle(c->view)));
+
+	json_object *idle_inhibitors = json_object_new_object();
+
+	struct sway_idle_inhibitor_v1 *user_inhibitor =
+		sway_idle_inhibit_v1_user_inhibitor_for_view(c->view);
+
+	if (user_inhibitor) {
+		json_object_object_add(idle_inhibitors, "user",
+			json_object_new_string(
+				ipc_json_user_idle_inhibitor_description(user_inhibitor->mode)));
+	} else {
+		json_object_object_add(idle_inhibitors, "user",
+			json_object_new_string("none"));
+	}
+
+	struct sway_idle_inhibitor_v1 *application_inhibitor =
+		sway_idle_inhibit_v1_application_inhibitor_for_view(c->view);
+
+	if (application_inhibitor) {
+		json_object_object_add(idle_inhibitors, "application",
+			json_object_new_string("enabled"));
+	} else {
+		json_object_object_add(idle_inhibitors, "application",
+			json_object_new_string("none"));
+	}
+
+	json_object_object_add(object, "idle_inhibitors", idle_inhibitors);
 
 #if HAVE_XWAYLAND
 	if (c->view->type == SWAY_VIEW_XWAYLAND) {
@@ -581,6 +625,14 @@ static void ipc_json_describe_container(struct sway_container *c, json_object *o
 	struct wlr_box deco_box = {0, 0, 0, 0};
 	get_deco_rect(c, &deco_box);
 	json_object_object_add(object, "deco_rect", ipc_json_create_rect(&deco_box));
+
+	json_object *marks = json_object_new_array();
+	list_t *con_marks = c->marks;
+	for (int i = 0; i < con_marks->length; ++i) {
+		json_object_array_add(marks, json_object_new_string(con_marks->items[i]));
+	}
+
+	json_object_object_add(object, "marks", marks);
 
 	if (c->view) {
 		ipc_json_describe_view(c, object);
@@ -1050,6 +1102,8 @@ json_object *ipc_json_describe_bar_config(struct bar_config *bar) {
 			json_object_new_boolean(bar->strip_workspace_numbers));
 	json_object_object_add(json, "strip_workspace_name",
 			json_object_new_boolean(bar->strip_workspace_name));
+	json_object_object_add(json, "workspace_min_width",
+			json_object_new_int(bar->workspace_min_width));
 	json_object_object_add(json, "binding_mode_indicator",
 			json_object_new_boolean(bar->binding_mode_indicator));
 	json_object_object_add(json, "verbose",
@@ -1208,4 +1262,11 @@ json_object *ipc_json_describe_bar_config(struct bar_config *bar) {
 			json_object_new_int(bar->tray_padding));
 #endif
 	return json;
+}
+
+json_object *ipc_json_get_binding_mode(void) {
+	json_object *current_mode = json_object_new_object();
+	json_object_object_add(current_mode, "name",
+			json_object_new_string(config->current_mode->name));
+	return current_mode;
 }

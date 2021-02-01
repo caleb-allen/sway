@@ -1,7 +1,8 @@
-#define _POSIX_C_SOURCE 200112L
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/backend/headless.h>
@@ -13,7 +14,6 @@
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_export_dmabuf_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
-#include <wlr/types/wlr_gtk_primary_selection.h>
 #include <wlr/types/wlr_idle.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
@@ -22,6 +22,7 @@
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_tablet_v2.h>
+#include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
@@ -42,7 +43,7 @@ bool server_privileged_prepare(struct sway_server *server) {
 	sway_log(SWAY_DEBUG, "Preparing Wayland server initialization");
 	server->wl_display = wl_display_create();
 	server->wl_event_loop = wl_display_get_event_loop(server->wl_display);
-	server->backend = wlr_backend_autocreate(server->wl_display, NULL);
+	server->backend = wlr_backend_autocreate(server->wl_display);
 
 	if (!server->backend) {
 		sway_log(SWAY_ERROR, "Unable to create backend");
@@ -68,7 +69,6 @@ bool server_init(struct sway_server *server) {
 		wlr_data_device_manager_create(server->wl_display);
 
 	wlr_gamma_control_manager_v1_create(server->wl_display);
-	wlr_gtk_primary_selection_device_manager_create(server->wl_display);
 
 	server->new_output.notify = handle_new_output;
 	wl_signal_add(&server->backend->events.new_output, &server->new_output);
@@ -141,13 +141,25 @@ bool server_init(struct sway_server *server) {
 		&server->output_power_manager_set_mode);
 	server->input_method = wlr_input_method_manager_v2_create(server->wl_display);
 	server->text_input = wlr_text_input_manager_v3_create(server->wl_display);
+	server->foreign_toplevel_manager =
+		wlr_foreign_toplevel_manager_v1_create(server->wl_display);
 
 	wlr_export_dmabuf_manager_v1_create(server->wl_display);
 	wlr_screencopy_manager_v1_create(server->wl_display);
 	wlr_data_control_manager_v1_create(server->wl_display);
 	wlr_primary_selection_v1_device_manager_create(server->wl_display);
+	wlr_viewporter_create(server->wl_display);
 
-	server->socket = wl_display_add_socket_auto(server->wl_display);
+	// Avoid using "wayland-0" as display socket
+	char name_candidate[16];
+	for (int i = 1; i <= 32; ++i) {
+		sprintf(name_candidate, "wayland-%d", i);
+		if (wl_display_add_socket(server->wl_display, name_candidate) >= 0) {
+			server->socket = strdup(name_candidate);
+			break;
+		}
+	}
+
 	if (!server->socket) {
 		sway_log(SWAY_ERROR, "Unable to open wayland socket");
 		wlr_backend_destroy(server->backend);
@@ -161,7 +173,12 @@ bool server_init(struct sway_server *server) {
 
 	server->headless_backend =
 		wlr_headless_backend_create_with_renderer(server->wl_display, renderer);
-	wlr_multi_backend_add(server->backend, server->headless_backend);
+	if (!server->headless_backend) {
+		sway_log(SWAY_INFO, "Failed to create secondary headless backend, "
+			"starting without it");
+	} else {
+		wlr_multi_backend_add(server->backend, server->headless_backend);
+	}
 
 	// This may have been set already via -Dtxn-timeout
 	if (!server->txn_timeout_ms) {
@@ -196,16 +213,21 @@ bool server_start(struct sway_server *server) {
 		server->xwayland.wlr_xwayland =
 			wlr_xwayland_create(server->wl_display, server->compositor,
 					config->xwayland == XWAYLAND_MODE_LAZY);
-		wl_signal_add(&server->xwayland.wlr_xwayland->events.new_surface,
-			&server->xwayland_surface);
-		server->xwayland_surface.notify = handle_xwayland_surface;
-		wl_signal_add(&server->xwayland.wlr_xwayland->events.ready,
-			&server->xwayland_ready);
-		server->xwayland_ready.notify = handle_xwayland_ready;
+		if (!server->xwayland.wlr_xwayland) {
+			sway_log(SWAY_ERROR, "Failed to start Xwayland");
+			unsetenv("DISPLAY");
+		} else {
+			wl_signal_add(&server->xwayland.wlr_xwayland->events.new_surface,
+				&server->xwayland_surface);
+			server->xwayland_surface.notify = handle_xwayland_surface;
+			wl_signal_add(&server->xwayland.wlr_xwayland->events.ready,
+				&server->xwayland_ready);
+			server->xwayland_ready.notify = handle_xwayland_ready;
 
-		setenv("DISPLAY", server->xwayland.wlr_xwayland->display_name, true);
+			setenv("DISPLAY", server->xwayland.wlr_xwayland->display_name, true);
 
-		/* xcursor configured by the default seat */
+			/* xcursor configured by the default seat */
+		}
 	}
 #endif
 

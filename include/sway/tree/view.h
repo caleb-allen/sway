@@ -43,16 +43,26 @@ struct sway_view_impl {
 	void (*set_activated)(struct sway_view *view, bool activated);
 	void (*set_tiled)(struct sway_view *view, bool tiled);
 	void (*set_fullscreen)(struct sway_view *view, bool fullscreen);
+	void (*set_resizing)(struct sway_view *view, bool resizing);
 	bool (*wants_floating)(struct sway_view *view);
 	void (*for_each_surface)(struct sway_view *view,
 		wlr_surface_iterator_func_t iterator, void *user_data);
-	void (*for_each_popup)(struct sway_view *view,
+	void (*for_each_popup_surface)(struct sway_view *view,
 		wlr_surface_iterator_func_t iterator, void *user_data);
 	bool (*is_transient_for)(struct sway_view *child,
 			struct sway_view *ancestor);
 	void (*close)(struct sway_view *view);
 	void (*close_popups)(struct sway_view *view);
 	void (*destroy)(struct sway_view *view);
+};
+
+struct sway_saved_buffer {
+	struct wlr_client_buffer *buffer;
+	int x, y;
+	int width, height;
+	enum wl_output_transform transform;
+	struct wlr_fbox source_box;
+	struct wl_list link; // sway_view::saved_buffers
 };
 
 struct sway_view {
@@ -64,9 +74,6 @@ struct sway_view {
 	struct sway_xdg_decoration *xdg_decoration;
 
 	pid_t pid;
-
-	double saved_x, saved_y;
-	int saved_width, saved_height;
 
 	// The size the view would want to be if it weren't tiled.
 	// Used when changing a view from tiled to floating.
@@ -80,8 +87,7 @@ struct sway_view {
 	bool allow_request_urgent;
 	struct wl_event_source *urgent_timer;
 
-	struct wlr_client_buffer *saved_buffer;
-	int saved_buffer_width, saved_buffer_height;
+	struct wl_list saved_buffers; // sway_saved_buffer::link
 
 	// The geometry for whatever the client is committing, regardless of
 	// transaction state. Updated on every commit.
@@ -90,6 +96,12 @@ struct sway_view {
 	// The "old" geometry during a transaction. Used to damage the old location
 	// when a transaction is applied.
 	struct wlr_box saved_geometry;
+
+	struct wlr_foreign_toplevel_handle_v1 *foreign_toplevel;
+	struct wl_listener foreign_activate_request;
+	struct wl_listener foreign_fullscreen_request;
+	struct wl_listener foreign_close_request;
+	struct wl_listener foreign_destroy;
 
 	bool destroying;
 
@@ -110,6 +122,8 @@ struct sway_view {
 	struct wl_listener surface_new_subsurface;
 
 	int max_render_time; // In milliseconds
+
+	enum seat_config_shortcuts_inhibit shortcuts_inhibit;
 };
 
 struct sway_xdg_shell_view {
@@ -135,6 +149,7 @@ struct sway_xwayland_view {
 	struct wl_listener request_move;
 	struct wl_listener request_resize;
 	struct wl_listener request_maximize;
+	struct wl_listener request_minimize;
 	struct wl_listener request_configure;
 	struct wl_listener request_fullscreen;
 	struct wl_listener request_activate;
@@ -147,6 +162,7 @@ struct sway_xwayland_view {
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener destroy;
+	struct wl_listener override_redirect;
 };
 
 struct sway_xwayland_unmanaged {
@@ -158,9 +174,11 @@ struct sway_xwayland_unmanaged {
 	struct wl_listener request_configure;
 	struct wl_listener request_fullscreen;
 	struct wl_listener commit;
+	struct wl_listener set_geometry;
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener destroy;
+	struct wl_listener override_redirect;
 };
 #endif
 struct sway_view_child;
@@ -230,12 +248,15 @@ void view_get_constraints(struct sway_view *view, double *min_width,
 uint32_t view_configure(struct sway_view *view, double lx, double ly, int width,
 	int height);
 
+bool view_inhibit_idle(struct sway_view *view);
+
 /**
- * Whether or not the view is the only visible view in its tree. If the view
- * is tiling, there may be floating views. If the view is floating, there may
- * be tiling views or views in a different floating container.
+ * Whether or not this view's most distant ancestor (possibly itself) is the
+ * only visible node in its tree. If the view is tiling, there may be floating
+ * views. If the view is floating, there may be tiling views or views in a
+ * different floating container.
  */
-bool view_is_only_visible(struct sway_view *view);
+bool view_ancestor_is_only_visible(struct sway_view *view);
 
 /**
  * Configure the view's position and size based on the container's position and
@@ -276,9 +297,9 @@ void view_for_each_surface(struct sway_view *view,
 	wlr_surface_iterator_func_t iterator, void *user_data);
 
 /**
- * Iterate all popups recursively.
+ * Iterate all popup surfaces of a view.
  */
-void view_for_each_popup(struct sway_view *view,
+void view_for_each_popup_surface(struct sway_view *view,
 	wlr_surface_iterator_func_t iterator, void *user_data);
 
 // view implementation

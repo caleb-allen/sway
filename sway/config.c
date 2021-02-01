@@ -154,9 +154,6 @@ void free_config(struct sway_config *config) {
 	list_free(config->no_focus);
 	list_free(config->active_bar_modifiers);
 	list_free_items_and_destroy(config->config_chain);
-	list_free(config->command_policies);
-	list_free(config->feature_policies);
-	list_free(config->ipc_policies);
 	free(config->floating_scroll_up_cmd);
 	free(config->floating_scroll_down_cmd);
 	free(config->floating_scroll_left_cmd);
@@ -328,11 +325,6 @@ static void config_defaults(struct sway_config *config) {
 
 	color_to_rgba(config->border_colors.background, 0xFFFFFFFF);
 
-	// Security
-	if (!(config->command_policies = create_list())) goto cleanup;
-	if (!(config->feature_policies = create_list())) goto cleanup;
-	if (!(config->ipc_policies = create_list())) goto cleanup;
-
 	// The keysym to keycode translation
 	struct xkb_rule_names rules = {0};
 	config->keysym_translation_state =
@@ -416,10 +408,14 @@ bool load_main_config(const char *file, bool is_active, bool validating) {
 	} else {
 		path = get_config_path();
 	}
+	if (path == NULL) {
+		sway_log(SWAY_ERROR, "Cannot find config file");
+		return false;
+	}
 
 	char *real_path = realpath(path, NULL);
 	if (real_path == NULL) {
-		sway_log(SWAY_DEBUG, "%s not found.", path);
+		sway_log(SWAY_ERROR, "%s not found", path);
 		free(path);
 		return false;
 	}
@@ -456,6 +452,7 @@ bool load_main_config(const char *file, bool is_active, bool validating) {
 		}
 	}
 
+	config->user_config_path = file ? true : false;
 	config->current_config_path = path;
 	list_add(config->config_chain, real_path);
 
