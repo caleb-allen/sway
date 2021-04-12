@@ -12,6 +12,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <wlr/util/log.h>
+#include <wlr/version.h>
 #include "sway/commands.h"
 #include "sway/config.h"
 #include "sway/server.h"
@@ -245,7 +246,7 @@ static void handle_wlr_log(enum wlr_log_importance importance,
 int main(int argc, char **argv) {
 	static int verbose = 0, debug = 0, validate = 0, allow_unsupported_gpu = 0;
 
-	static struct option long_options[] = {
+	static const struct option long_options[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"config", required_argument, NULL, 'c'},
 		{"validate", no_argument, NULL, 'C'},
@@ -344,6 +345,7 @@ int main(int argc, char **argv) {
 	}
 
 	sway_log(SWAY_INFO, "Sway version " SWAY_VERSION);
+	sway_log(SWAY_INFO, "wlroots version " WLR_VERSION_STR);
 	log_kernel();
 	log_distro();
 	log_env();
